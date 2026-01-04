@@ -75,6 +75,7 @@ def main():
         accelerator="gpu",
         devices=args.devices,
         strategy=strategy,
+        precision="16-mixed",  
         # gradient_clip_val=0.5,
         max_epochs=args.max_epochs,
         callbacks=[checkpoint_callback], # Critical to include this
