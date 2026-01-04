@@ -322,6 +322,22 @@ class HiVT(pl.LightningModule):
         sch_g = torch.optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=self.T_max, eta_min=1e-6)
         return [opt_g, opt_d], [{"scheduler": sch_g, "interval": "epoch"}]
 
+    def on_train_epoch_start(self):
+        # --- FREEZING LOGIC FOR TRANSFER LEARNING ---
+        # We freeze the encoder for the first 5 epochs to stabilize fine-tuning
+        if self.current_epoch < 5:
+            if self.global_rank == 0:
+                print(f"--- Epoch {self.current_epoch}: LocalEncoder is FROZEN ---")
+            self.local_encoder.eval()
+            for param in self.local_encoder.parameters():
+                param.requires_grad = False
+        else:
+            if self.global_rank == 0 and self.current_epoch == 5:
+                print(f"--- Epoch {self.current_epoch}: Unfreezing LocalEncoder ---")
+            self.local_encoder.train()
+            for param in self.local_encoder.parameters():
+                param.requires_grad = True
+
     def _build_real_fake_dicts(self, data, y_hat, best_mode):
         # Ensure we only take the (x, y) coordinates for the critics
         real = data.y

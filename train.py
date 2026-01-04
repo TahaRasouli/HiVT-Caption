@@ -36,25 +36,31 @@ def main():
     parser = HiVT.add_model_specific_args(parser)
     args = parser.parse_args()
 
-    # Model Initialization
+    # 1. Lower the Learning Rate for fine-tuning if a checkpoint is provided
+    if args.ckpt_path:
+        print(f"Fine-tuning detected. Lowering Learning Rate to 1e-4")
+        args.lr = 1e-4 
+
+    # 2. Model Initialization
     model = HiVT(**vars(args))
 
-    # --- WARM START LOGIC ---
+    # --- WARM START LOGIC (Improved) ---
     actual_fit_path = args.ckpt_path
-    if args.ckpt_path and args.use_gan:
-        print(f"--- Checking checkpoint: {args.ckpt_path} ---")
+    if args.ckpt_path:
+        print(f"--- Loading Weights from: {args.ckpt_path} ---")
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
         
-        # Check if this is a pre-trained HiVT backbone or a GAN resume
+        # Check for GAN critics
         has_critics = any("D_short" in k for k in ckpt['state_dict'].keys())
         
         if not has_critics:
-            print("Detected non-GAN checkpoint. Manual weight load (strict=False) enabled.")
+            # Official HiVT checkpoints are Supervised-only
+            print("Detected Supervised checkpoint. Loading state_dict (strict=False).")
             model.load_state_dict(ckpt['state_dict'], strict=False)
-            # Must be None to prevent Lightning from looking for D_short optimizers
+            # Reset actual_fit_path so Lightning doesn't try to resume optimizer states
             actual_fit_path = None 
         else:
-            print("Detected GAN checkpoint. Full state restoration enabled.")
+            print("Detected GAN checkpoint. Full resume enabled.")
 
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
