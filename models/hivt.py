@@ -265,26 +265,33 @@ class HiVT(pl.LightningModule):
         sch_g = torch.optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=self.T_max, eta_min=1e-6)
         return [opt_g, opt_d], [{"scheduler": sch_g, "interval": "epoch"}]
 
+
     def on_train_epoch_start(self):
-        """Selective Freezing Logic for GAN Training"""
         if self.use_gan:
-            # We want to freeze the LocalEncoder except the last 2 temporal layers
-            # This allows the model to fine-tune TEMPORAL smoothness (jerk) 
-            # while keeping the spatial embeddings fixed.
-            if self.global_rank == 0:
+            if self.global_rank == 0 and self.current_epoch == 0:
                 print("--- GAN MODE: Freezing Encoder except last 2 layers ---")
             
-            # Freeze all first
+            # 1. Freeze everything first
             self.local_encoder.eval()
             for param in self.local_encoder.parameters():
                 param.requires_grad = False
             
-            # Unfreeze only the last 2 layers (Temporal blocks)
-            # Assuming LocalEncoder has a list of temporal_blocks
-            for i in range(2, 4): # Layers 2 and 3 (the last two)
-                for param in self.local_encoder.temporal_blocks[i].parameters():
+            # 2. Unfreeze specific layers (DEBUGGING ADDED)
+            # Adjust the string "temporal_blocks" if your LocalEncoder uses "layers" or "encoder"
+            unfrozen_count = 0
+            for name, param in self.local_encoder.named_parameters():
+                # Check for the last two blocks (indices 2 and 3 usually)
+                if "temporal" in name and (".2." in name or ".3." in name):
                     param.requires_grad = True
-                    self.local_encoder.temporal_blocks[i].train()
+                    unfrozen_count += 1
+            
+            # SAFETY CHECK
+            if self.global_rank == 0 and self.current_epoch == 0:
+                if unfrozen_count == 0:
+                    print("WARNING: No layers were unfrozen! Check your layer names strings.")
+                    print("Available keys examples:", list(dict(self.local_encoder.named_parameters()).keys())[:5])
+                else:
+                    print(f"SUCCESS: Unfrozen {unfrozen_count} parameters in LocalEncoder.")
         else:
             # Standard training behavior
             self.local_encoder.train()
@@ -334,6 +341,7 @@ class HiVT(pl.LightningModule):
         parser.add_argument('--use_gan', action='store_true')
         parser.add_argument('--lambda_adv', type=float, default=0.1)
         parser.add_argument('--lambda_r1', type=float, default=1.0)
+        parser.add_argument('--lambda_jerk', type=float, default=0.05)
         parser.add_argument('--critic_steps', type=int, default=1)
         parser.add_argument('--critic_lr', type=float, default=1e-4)
         parser.add_argument('--short_horizon', type=int, default=10)
