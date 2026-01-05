@@ -70,7 +70,7 @@ def main():
     )
 
     # Trainer
-    strategy = DDPStrategy(find_unused_parameters=False)
+    strategy = DDPStrategy(find_unused_parameters=True)
     trainer = pl.Trainer(
         accelerator="gpu",
         devices=args.devices,
