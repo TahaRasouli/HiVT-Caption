@@ -22,14 +22,32 @@ class FastRealismEvaluator:
 
     def is_off_road(self, pt, city):
         if city not in self.masks: return False
-        res = self.meta[city][2]
-        # Map global (x,y) to pixel coordinates
+        
+        # 1. Retrieve mask and metadata
+        mask = self.masks[city]
+        width, height, res = self.meta[city]
+        
+        # 2. NuScenes map offset handling
+        # IMPORTANT: Global NuScenes maps have a specific minimum (x, y)
+        # For 'singapore-onenorth', min_x is 0, but for others, it varies.
+        # However, the nmap.get_map_mask usually centers the patch box.
+        # Since we used patch_box = (width/2, height/2, height, width),
+        # pixel (0,0) in the mask corresponds to global (0,0).
+        
         px = int(pt[0] / res)
         py = int(pt[1] / res)
-        mask = self.masks[city]
+        
+        # 3. Boundary and Orientation Check
+        # NuScenes Bitmaps usually follow (Row=Y, Col=X)
+        # We also need to flip the Y axis because images start from Top-Left (0,0)
+        # while maps start from Bottom-Left (0,0)
+        
         if 0 <= py < mask.shape[0] and 0 <= px < mask.shape[1]:
-            return mask[py, px] == 0 # 0 means off-road
-        return True
+            # Flip Y to account for image vs cartesian coordinates
+            flipped_py = mask.shape[0] - 1 - py
+            return mask[flipped_py, px] == 0 
+            
+        return True # Treat out-of-bounds as off-road
 
     def compute_metrics(self, batch, y_hat):
         # 1. Select best trajectory per agent (MinFDE)
