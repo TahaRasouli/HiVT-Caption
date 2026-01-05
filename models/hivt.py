@@ -6,6 +6,7 @@ from typing import Tuple, Dict, List, Optional
 
 from losses import LaplaceNLLLoss, SoftTargetCrossEntropyLoss
 from losses import AdversarialDiscriminatorLoss, AdversarialGeneratorLoss
+from losses import PhysicsLoss
 from metrics import ADE, FDE, MR
 
 try:
@@ -42,6 +43,7 @@ class HiVT(pl.LightningModule):
         self.use_gan = kwargs.get("use_gan", False)
         self.lambda_adv = kwargs.get("lambda_adv", 0.1)
         self.lambda_r1 = kwargs.get("lambda_r1", 1.0)
+        self.lambda_jerk = kwargs.get("lambda_jerk", 0.05)
         self.critic_steps = kwargs.get("critic_steps", 1)
         self.critic_lr = kwargs.get("critic_lr", 1e-4)
         self.automatic_optimization = not self.use_gan
@@ -142,120 +144,52 @@ class HiVT(pl.LightningModule):
         return real_trajs, fake_trajs, keep
 
     def training_step(self, data, batch_idx):
-        # 1. Setup flags
-        # We calculate these but DO NOT branch yet.
-        has_nans = torch.isnan(data.y).any()
-        
         # -----------------------------------------------------
-        # Case A: Supervised Only
+        # Branch 1: Supervised Training
         # -----------------------------------------------------
         if not self.use_gan:
-            if has_nans:
-                # Dummy loss to keep DDP in sync
-                dummy_loss = sum(p.sum() for p in self.parameters()) * 0.0
-                # Log 0.0 to keep sync_dist happy
-                self.log("train_reg_loss", 0.0, on_epoch=True, prog_bar=True, batch_size=data.num_graphs, sync_dist=True)
-                return dummy_loss
-            
             y_hat, pi = self(data)
             reg_loss, cls_loss, _ = self._supervised_losses(data, y_hat, pi)
             loss = reg_loss + cls_loss
-            self.log("train_reg_loss", reg_loss, on_epoch=True, prog_bar=True, batch_size=data.num_graphs, sync_dist=True)
+            self.log("train_reg_loss", reg_loss, on_epoch=True, prog_bar=True, sync_dist=True)
             return loss
 
         # -----------------------------------------------------
-        # Case B: GAN training (Manual Optimization)
+        # Branch 2: GAN Training (Manual Optimization)
         # -----------------------------------------------------
         opt_g, opt_d = self.optimizers()
         
-        # Initialize variables to ensure they exist for logging later
-        d_loss_val = torch.tensor(0.0, device=self.device)
-        reg_loss_val = torch.tensor(0.0, device=self.device)
-        
-        # -----------------------------------------------------
-        # 1. Forward Pass & Validity Check
-        # -----------------------------------------------------
-        # We wrap forward pass to prevent crashing on NaNs
-        if not has_nans:
-            y_hat, pi = self(data)
-            reg_loss, cls_loss, best_mode = self._supervised_losses(data, y_hat, pi)
-            real_trajs, fake_trajs, keep = self._build_real_fake_dicts(data, y_hat, best_mode)
-            is_valid = (real_trajs["long"].size(0) > 0)
-            
-            if is_valid:
-                reg_loss_val = reg_loss.detach()
-        else:
-            is_valid = False
-            y_hat = None
+        y_hat, pi = self(data)
+        reg_loss, cls_loss, best_mode = self._supervised_losses(data, y_hat, pi)
+        real_trajs, fake_trajs, _ = self._build_real_fake_dicts(data, y_hat, best_mode)
 
-        # -----------------------------------------------------
-        # 2. D Step (Discriminator)
-        # -----------------------------------------------------
+        # --- Step 1: Discriminator ---
         for _ in range(self.critic_steps):
             opt_d.zero_grad()
-            
-            if is_valid:
-                # Valid Path: Detach and Calculate
-                fake_detached = {k: v.detach().requires_grad_(True) for k, v in fake_trajs.items()}
-                d_loss, _ = self.d_loss_fn(self.critics, real_trajs, fake_detached)
-                self.manual_backward(d_loss)
-                self.clip_gradients(opt_d, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
-                d_loss_val = d_loss.detach()
-            else:
-                # Dummy Path: Touch parameters to satisfy DDP
-                # We sum *all* critic params to ensure DDP buckets are happy
-                dummy = sum(p.sum() for p in self.D_short.parameters()) 
-                dummy += sum(p.sum() for p in self.D_mid.parameters())
-                dummy += sum(p.sum() for p in self.D_long.parameters())
-                self.manual_backward(dummy * 0.0)
-            
-            # ALWAYS STEP
+            d_loss, _ = self.d_loss_fn(self.critics, real_trajs, 
+                                       {k: v.detach().requires_grad_(True) for k, v in fake_trajs.items()})
+            self.manual_backward(d_loss)
             opt_d.step()
 
-        # -----------------------------------------------------
-        # 3. G Step (Generator)
-        # -----------------------------------------------------
+        # --- Step 2: Generator ---
         opt_g.zero_grad()
+        g_adv, _ = self.g_loss_fn(self.critics, fake_trajs)
         
-        if is_valid:
-            # Valid Path
-            g_adv, _ = self.g_loss_fn(self.critics, fake_trajs)
-            g_total = reg_loss + cls_loss + (self.lambda_adv * g_adv)
-            self.manual_backward(g_total)
-            self.clip_gradients(opt_g, gradient_clip_val=0.5, gradient_clip_algorithm="norm")
-        else:
-            # Dummy Path
-            dummy = sum(p.sum() for p in self.local_encoder.parameters()) * 0.0
-            self.manual_backward(dummy)
-            g_total = dummy
-            
-        # ALWAYS STEP
+        # NEW: Jerk Loss Integration
+        # We apply this to the full-scale (long) fake trajectory
+        j_loss = PhysicsLoss.compute_jerk_loss(fake_trajs["long"])
+        
+        # Combined Generator Objective
+        g_total = reg_loss + cls_loss + (self.lambda_adv * g_adv) + (self.lambda_jerk * j_loss)
+        
+        self.manual_backward(g_total)
         opt_g.step()
 
-        # -----------------------------------------------------
-        # 4. Scheduler Step
-        # -----------------------------------------------------
-        if self.trainer.is_last_batch:
-            sch = self.lr_schedulers()
-            if sch is not None:
-                sch.step()
-
-        # -----------------------------------------------------
-        # 5. Logging (UNCONDITIONAL)
-        # -----------------------------------------------------
-        # The logging call happens NO MATTER WHAT.
-        # This prevents the synchronization deadlock.
-        self.log("train_reg_loss", reg_loss_val, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=data.num_graphs)
-        self.log("train_d_loss", d_loss_val, on_epoch=True, sync_dist=True, batch_size=data.num_graphs)
-        
-        # Realism metrics are local (no sync needed), so we can keep them conditional
-        if _HAS_REALISM_METRICS and is_valid:
-             self.val_endpoint_diversity.update(
-                y_hat[:, data['agent_index'], :, :2].detach(), 
-                pi[data['agent_index']].detach()
-            )
-
+        # Logging
+        self.log("train_j_loss", j_loss, on_epoch=True, prog_bar=True)
+        self.log("train_reg_loss", reg_loss, on_epoch=True)
         return g_total
+
     def validation_step(self, data, batch_idx):
         y_hat, pi = self(data)
 
@@ -265,15 +199,24 @@ class HiVT(pl.LightningModule):
         best_mode = l2_norm.argmin(dim=0)
         y_hat_best = y_hat[best_mode, torch.arange(data.num_nodes)]
         
-        # Log Loss
+        # Log Regression Loss (Accuracy)
         reg_loss = self.reg_loss(y_hat_best[reg_mask], data.y[reg_mask])
         self.log('val_reg_loss', reg_loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=1)
 
+        # --- NEW: Monitor Physics Loss on Validation ---
+        # We calculate the jerk loss on the best predicted mode to see if it's improving
+        if self.use_gan:
+            # Only relevant when we are actually training with GAN/Physics
+            # We assume y_hat_best contains the [N, 30, 2] future trajectories
+            val_jerk_loss = PhysicsLoss.compute_jerk_loss(y_hat_best)
+            self.log('val_jerk_loss', val_jerk_loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=1)
+
         # 2. Slice for Agent (The "Interesting" Vehicle)
+        # We filter metrics to only the primary agent to match leaderboard standards
         y_hat_agent = y_hat[:, data['agent_index'], :, : 2]
         y_agent = data.y[data['agent_index']]
         
-        # Calculate ADE/FDE
+        # Calculate ADE/FDE for the agent
         fde_agent = torch.norm(y_hat_agent[:, :, -1] - y_agent[:, -1], p=2, dim=-1)
         best_mode_agent = fde_agent.argmin(dim=0)
         y_hat_best_agent = y_hat_agent[best_mode_agent, torch.arange(data.num_graphs)]
@@ -287,13 +230,13 @@ class HiVT(pl.LightningModule):
         self.log('val_minFDE', self.minFDE, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
         self.log('val_minMR', self.minMR, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
 
-        # 3. REALISM METRICS (Enable this NOW)
+        # 3. REALISM METRICS
         if _HAS_REALISM_METRICS:
-            # FIX: Remove 'y_agent' from these two calls
-            self.val_jerk.update(y_hat_best_agent)            # <--- Was (y_hat_best_agent, y_agent)
-            self.val_speed_violation.update(y_hat_best_agent) # <--- Was (y_hat_best_agent, y_agent)
+            # Physics metrics on the best trajectory
+            self.val_jerk.update(y_hat_best_agent)
+            self.val_speed_violation.update(y_hat_best_agent)
             
-            # Diversity needs both (predictions and probabilities)
+            # Diversity needs all modes + probabilities
             self.val_endpoint_diversity.update(y_hat_agent, pi[data['agent_index']])
 
             self.log('val_jerk', self.val_jerk, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
@@ -323,17 +266,27 @@ class HiVT(pl.LightningModule):
         return [opt_g, opt_d], [{"scheduler": sch_g, "interval": "epoch"}]
 
     def on_train_epoch_start(self):
-        # --- FREEZING LOGIC FOR TRANSFER LEARNING ---
-        # We freeze the encoder for the first 5 epochs to stabilize fine-tuning
-        if self.current_epoch < 5:
+        """Selective Freezing Logic for GAN Training"""
+        if self.use_gan:
+            # We want to freeze the LocalEncoder except the last 2 temporal layers
+            # This allows the model to fine-tune TEMPORAL smoothness (jerk) 
+            # while keeping the spatial embeddings fixed.
             if self.global_rank == 0:
-                print(f"--- Epoch {self.current_epoch}: LocalEncoder is FROZEN ---")
+                print("--- GAN MODE: Freezing Encoder except last 2 layers ---")
+            
+            # Freeze all first
             self.local_encoder.eval()
             for param in self.local_encoder.parameters():
                 param.requires_grad = False
+            
+            # Unfreeze only the last 2 layers (Temporal blocks)
+            # Assuming LocalEncoder has a list of temporal_blocks
+            for i in range(2, 4): # Layers 2 and 3 (the last two)
+                for param in self.local_encoder.temporal_blocks[i].parameters():
+                    param.requires_grad = True
+                    self.local_encoder.temporal_blocks[i].train()
         else:
-            if self.global_rank == 0 and self.current_epoch == 5:
-                print(f"--- Epoch {self.current_epoch}: Unfreezing LocalEncoder ---")
+            # Standard training behavior
             self.local_encoder.train()
             for param in self.local_encoder.parameters():
                 param.requires_grad = True
