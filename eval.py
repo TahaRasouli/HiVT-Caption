@@ -43,7 +43,7 @@ class FullEvaluator:
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("--root", type=str, default="/mount/arbeitsdaten/studenten4/rasoulta")
+    parser.add_argument("--root", type=str, default="/mount/studenten/projects/rasoulta/dataset/")
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=32)
     args = parser.parse_args()
