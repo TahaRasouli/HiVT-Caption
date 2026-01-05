@@ -2,153 +2,102 @@ import os
 import torch
 import numpy as np
 from argparse import ArgumentParser
-import pytorch_lightning as pl
 from tqdm import tqdm
-
 from datamodules.nuscenes_datamodule import NuScenesHiVTDataModule
 from models.hivt import HiVT
-from nuscenes.map_expansion.map_api import NuScenesMap
 
-# Speed boost for A6000
+# Performance optimization for A6000
 torch.set_float32_matmul_precision('high')
 
-class AdvancedEvaluator:
-    def __init__(self, nusc_root: str):
-        # Maps are located in the 'maps' folder under the v1.0-trainval parent directory
-        # The path provided: /mount/arbeitsdaten/analysis/rasoulta/nuscenes/nuscenes_meta/v1.0-trainval/
-        self.map_root = os.path.dirname(nusc_root.rstrip('/'))
-        self.map_names = ['singapore-onenorth', 'singapore-hollandvillage', 'singapore-queenstown', 'boston-seaport']
-        self.maps = {
-            loc: NuScenesMap(dataroot=self.map_root, map_name=loc) 
-            for loc in self.map_names
-        }
+class FastRealismEvaluator:
+    def __init__(self, raster_dir):
+        self.masks = {}
+        self.meta = {}
+        for city in ['singapore-onenorth', 'singapore-hollandvillage', 'singapore-queenstown', 'boston-seaport']:
+            mask_path = os.path.join(raster_dir, f"{city}_mask.npy")
+            meta_path = os.path.join(raster_dir, f"{city}_meta.npy")
+            if os.path.exists(mask_path):
+                self.masks[city] = np.load(mask_path)
+                self.meta[city] = np.load(meta_path) # [edge_x, edge_y, res]
 
     def is_off_road(self, pt, city):
-        """Checks if a global (x, y) point is outside drivable areas."""
-        if city not in self.maps: 
-            return False
-        
-        # CORRECTED METHOD NAME
-        layers = self.maps[city].layers_on_point(pt[0], pt[1])
-        
-        # In NuScenes, layers_on_point returns a dict where keys are layer names
-        # and values are the tokens of the objects at that point.
-        drivable = layers.get('drivable_area', '')
-        lane = layers.get('lane', '')
-        lane_conn = layers.get('lane_connector', '')
-        
-        return not (drivable or lane or lane_conn)
-    def compute_scene_metrics(self, batch, y_hat):
-        """
-        Calculates advanced realism metrics for a batch.
-        y_hat: [modes, nodes, steps, 2]
-        """
-        # --- 1. Best Mode Selection ---
-        # We find the best mode for the primary agent to evaluate realism on
-        agent_indices = batch.agent_index
+        if city not in self.masks: return False
+        res = self.meta[city][2]
+        # Map global (x,y) to pixel coordinates
+        px = int(pt[0] / res)
+        py = int(pt[1] / res)
+        mask = self.masks[city]
+        if 0 <= py < mask.shape[0] and 0 <= px < mask.shape[1]:
+            return mask[py, px] == 0 # 0 means off-road
+        return True
+
+    def compute_metrics(self, batch, y_hat):
+        # 1. Select best trajectory per agent (MinFDE)
         reg_mask = ~batch['padding_mask'][:, 20:]
-        
-        # Calculate FDE for all modes for ALL agents
         l2_norm = (torch.norm(y_hat[:, :, :, :2] - batch.y, p=2, dim=-1) * reg_mask).sum(dim=-1)
-        # best_mode_idx shape: [num_nodes]
         best_mode_idx = l2_norm.argmin(dim=0)
-        # Select the best trajectory for every agent
         best_trajs = y_hat[best_mode_idx, torch.arange(batch.num_nodes), :, :2]
 
-        # --- 2. Heading Error (Rad) ---
-        # Evaluate only on the primary agents to save time
-        best_agent_trajs = best_trajs[agent_indices]
-        gt_agent_trajs = batch.y[agent_indices]
-        
-        # Vector from second-to-last to last point
-        v_pred = (best_agent_trajs[:, -1] - best_agent_trajs[:, -2]).detach()
-        v_gt = (gt_agent_trajs[:, -1] - gt_agent_trajs[:, -2]).detach()
-        
+        # 2. Heading Error (Rad) - Focus on primary agents
+        agent_idx = batch.agent_index
+        v_pred = (best_trajs[agent_idx, -1] - best_trajs[agent_idx, -2])
+        v_gt = (batch.y[agent_idx, -1] - batch.y[agent_idx, -2])
         heading_err = torch.abs(torch.atan2(v_pred[:, 1], v_pred[:, 0]) - 
                                 torch.atan2(v_gt[:, 1], v_gt[:, 0]))
-        # Wrap to [0, pi]
         heading_err = torch.where(heading_err > np.pi, 2*np.pi - heading_err, heading_err)
 
-        # --- 3. Optimized Off-Road Rate ---
+        # 3. Fast Off-Road Rate
         off_road_count = 0
-        origin = batch.origin.cpu().numpy() # [num_graphs, 2]
-        theta = batch.theta.cpu().numpy()   # [num_graphs]
+        origin = batch.origin.cpu().numpy()
+        theta = batch.theta.cpu().numpy()
         
-        for i, idx in enumerate(agent_indices):
-            # 1. Get city (default to singapore-onenorth if not found)
+        for i, idx in enumerate(agent_idx):
             city = batch.city[i] if hasattr(batch, 'city') else 'singapore-onenorth'
-            
-            # 2. Get local destination of the PRIMARY agent
             local_dest = best_trajs[idx, -1].cpu().numpy()
-            
-            # 3. Transform to Global
-            cos, sin = np.cos(-theta[i]), np.sin(-theta[i])
-            rot_mat = np.array([[cos, -sin], [sin, cos]])
+            c, s = np.cos(-theta[i]), np.sin(-theta[i])
+            rot_mat = np.array([[c, -s], [s, c]])
             global_dest = (local_dest @ rot_mat.T) + origin[i]
             
-            # 4. Corrected Map Query
             if self.is_off_road(global_dest, city):
                 off_road_count += 1
 
-        # --- 4. Collision Rate ---
-        # Check every 0.5s (step 4, 9, 14, 19, 24, 29) to avoid being "stuck"
-        collision_detected_in_batch = 0
-        for t in range(4, best_trajs.size(1), 5):
-            # Calculate distance between ALL agents in the scene
+        # 4. Collision Rate (Spatial check)
+        collision = 0
+        for t in [14, 29]: # Check at 1.5s and 3.0s
             dists = torch.cdist(best_trajs[:, t, :], best_trajs[:, t, :])
-            # Add large value to diagonal so agents don't "collide" with themselves
             dists += torch.eye(best_trajs.size(0), device=best_trajs.device) * 10.0
-            
-            if (dists < 1.8).any(): # 1.8m threshold for vehicle width
-                collision_detected_in_batch = 1
+            if (dists < 1.8).any(): 
+                collision = 1
                 break
 
-        return {
-            "heading_err": heading_err.mean().item(),
-            "off_road": off_road_count / len(agent_indices) if len(agent_indices) > 0 else 0,
-            "collision": collision_detected_in_batch
-        }
+        return heading_err.mean().item(), off_road_count / len(agent_idx), collision
 
 def main():
     parser = ArgumentParser()
+    parser.add_argument("--root", type=str, default="/mount/arbeitsdaten/studenten4/rasoulta")
     parser.add_argument("--nusc_root", type=str, default="/mount/arbeitsdaten/analysis/rasoulta/nuscenes/nuscenes_meta/v1.0-trainval/")
-    parser.add_argument("--processed_root", type=str, default="/mount/studenten/projects/rasoulta/dataset")
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=32)
     args = parser.parse_args()
 
-    # Load Model
-    model = HiVT.load_from_checkpoint(args.ckpt_path, strict=False)
-    model.eval()
+    model = HiVT.load_from_checkpoint(args.ckpt_path, strict=False).eval()
+    evaluator = FastRealismEvaluator(os.path.join(args.nusc_root, "raster_maps"))
+    
+    dm = NuScenesHiVTDataModule(root=args.root, val_batch_size=args.batch_size)
+    dm.setup(stage="validate")
+    
+    h_errs, or_rates, colls = [], [], []
+    
+    for batch in tqdm(dm.val_dataloader(), desc="Evaluating"):
+        batch = batch.to(model.device)
+        with torch.no_grad():
+            y_hat, _ = model(batch)
+            h, o, c = evaluator.compute_metrics(batch, y_hat)
+            h_errs.append(h); or_rates.append(o); colls.append(c)
 
-    # Setup Evaluator
-    evaluator = AdvancedEvaluator(args.nusc_root)
-
-    # Setup Data
-    datamodule = NuScenesHiVTDataModule(root=args.processed_root, val_batch_size=args.batch_size)
-    datamodule.setup(stage="validate")
-    val_loader = datamodule.val_dataloader()
-
-    metrics = {"heading": [], "off_road": [], "collision": []}
-
-    print("--- Starting Advanced Inference ---")
-    with torch.no_grad():
-        for batch in tqdm(val_loader):
-            batch = batch.to(model.device)
-            y_hat, pi = model(batch)
-            
-            scene_res = evaluator.compute_scene_metrics(batch, y_hat)
-            metrics["heading"].append(scene_res["heading_err"])
-            metrics["off_road"].append(scene_res["off_road"])
-            metrics["collision"].append(scene_res["collision"])
-
-    print("\n" + "="*50)
-    print("ADVANCED REALISM METRICS")
-    print("-" * 50)
-    print(f" • Heading Error (Rad): {np.mean(metrics['heading']):.4f}")
-    print(f" • Off-Road Rate (%)  : {np.mean(metrics['off_road'])*100:.2f}%")
-    print(f" • Collision Rate (%) : {np.mean(metrics['collision'])*100:.2f}%")
-    print("="*50)
+    print(f"\nHEADING ERROR: {np.mean(h_errs):.4f} rad")
+    print(f"OFF-ROAD RATE: {np.mean(or_rates)*100:.2f}%")
+    print(f"COLLISION RATE: {np.mean(colls)*100:.2f}%")
 
 if __name__ == "__main__":
     main()
