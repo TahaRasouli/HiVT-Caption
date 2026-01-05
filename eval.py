@@ -5,6 +5,9 @@ import pytorch_lightning as pl
 from datamodules.nuscenes_datamodule import NuScenesHiVTDataModule
 from models.hivt import HiVT
 
+# speed boost for A6000
+torch.set_float32_matmul_precision('medium')
+
 def evaluate():
     parser = ArgumentParser()
     
@@ -17,18 +20,18 @@ def evaluate():
     parser.add_argument("--num_workers", type=int, default=8)
     parser.add_argument("--devices", type=int, default=1)
     
-    # Model specific args (to ensure dimensions match)
+    # Model specific args
     parser = HiVT.add_model_specific_args(parser)
     args = parser.parse_args()
 
     print(f"--- Loading Model from Checkpoint: {args.ckpt_path} ---")
     
     # 1. Load the model
-    # strict=False allows loading even if some GAN components are missing in the ckpt
+    # We pass args so the architecture matches the checkpoint
     model = HiVT.load_from_checkpoint(args.ckpt_path, strict=False, **vars(args))
     model.eval()
 
-    # 2. Initialize DataModule
+    # 2. Initialize and SETUP DataModule
     datamodule = NuScenesHiVTDataModule(
         root=args.root,
         train_batch_size=args.batch_size,
@@ -37,23 +40,25 @@ def evaluate():
         shuffle=False,
         pin_memory=False
     )
+    
+    # CRITICAL FIX: Manually call setup so val_dataset is initialized
+    print("--- Setting up Validation Dataset ---")
+    datamodule.setup(stage='validate')
 
-    # 3. Initialize Trainer for Validation
-    # We use 16-mixed to match your training speed/precision
+    # 3. Initialize Trainer
     trainer = pl.Trainer(
         accelerator="gpu",
         devices=args.devices,
         precision="16-mixed",
-        logger=False # We only want the console output
+        logger=False
     )
 
-    print("\n--- Starting Validation Epoch ---")
+    print("\n--- Starting Validation Pass ---")
     
     # 4. Run Validation
-    # This calls the validation_step in your hivt.py
     results = trainer.validate(model, datamodule=datamodule, verbose=True)
 
-    # 5. Formatted Print
+    # 5. Formatted Results Print
     print("\n" + "="*50)
     print("FINAL EVALUATION RESULTS (NuScenes Validation Set)")
     print("="*50)
@@ -70,7 +75,9 @@ def evaluate():
 
     for label, key in metrics_to_print:
         val = res.get(key, "N/A")
-        if isinstance(val, float):
+        if isinstance(val, torch.Tensor):
+            val = val.item()
+        if isinstance(val, (float, int)):
             print(f" • {label:18}: {val:.4f}")
         else:
             print(f" • {label:18}: {val}")
