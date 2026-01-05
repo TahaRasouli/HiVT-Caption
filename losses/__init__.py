@@ -6,6 +6,7 @@ from losses.adv_losses import (
     AdversarialDiscriminatorLoss,
     AdversarialGeneratorLoss,
 )
+from losses.physics_losses import PhysicsLoss
 
 __all__ = [
     "LaplaceNLLLoss",
@@ -13,4 +14,5 @@ __all__ = [
     "R1Regularization",
     "AdversarialDiscriminatorLoss",
     "AdversarialGeneratorLoss",
+    "PhysicsLoss"
 ]
