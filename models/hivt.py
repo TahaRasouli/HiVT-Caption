@@ -151,7 +151,8 @@ class HiVT(pl.LightningModule):
             y_hat, pi = self(data)
             reg_loss, cls_loss, _ = self._supervised_losses(data, y_hat, pi)
             loss = reg_loss + cls_loss
-            self.log("train_reg_loss", reg_loss, on_epoch=True, prog_bar=True, sync_dist=True)
+            # FIXED: Added batch_size
+            self.log("train_reg_loss", reg_loss, on_epoch=True, prog_bar=True, sync_dist=True, batch_size=data.num_graphs)
             return loss
 
         # -----------------------------------------------------
@@ -175,19 +176,18 @@ class HiVT(pl.LightningModule):
         opt_g.zero_grad()
         g_adv, _ = self.g_loss_fn(self.critics, fake_trajs)
         
-        # NEW: Jerk Loss Integration
-        # We apply this to the full-scale (long) fake trajectory
         j_loss = PhysicsLoss.compute_jerk_loss(fake_trajs["long"])
         
-        # Combined Generator Objective
         g_total = reg_loss + cls_loss + (self.lambda_adv * g_adv) + (self.lambda_jerk * j_loss)
         
         self.manual_backward(g_total)
         opt_g.step()
 
-        # Logging
-        self.log("train_j_loss", j_loss, on_epoch=True, prog_bar=True)
-        self.log("train_reg_loss", reg_loss, on_epoch=True)
+        # FIXED: Added batch_size to ALL logs
+        self.log("train_j_loss", j_loss, on_epoch=True, prog_bar=True, batch_size=data.num_graphs)
+        self.log("train_reg_loss", reg_loss, on_epoch=True, batch_size=data.num_graphs)
+        # Note: We don't typically log d_loss every step to save screen space, but if you do, add batch_size there too.
+        
         return g_total
 
     def validation_step(self, data, batch_idx):
@@ -199,24 +199,21 @@ class HiVT(pl.LightningModule):
         best_mode = l2_norm.argmin(dim=0)
         y_hat_best = y_hat[best_mode, torch.arange(data.num_nodes)]
         
-        # Log Regression Loss (Accuracy)
+        # Log Regression Loss
         reg_loss = self.reg_loss(y_hat_best[reg_mask], data.y[reg_mask])
-        self.log('val_reg_loss', reg_loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=1)
+        # FIXED: Added batch_size
+        self.log('val_reg_loss', reg_loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=data.num_graphs)
 
-        # --- NEW: Monitor Physics Loss on Validation ---
-        # We calculate the jerk loss on the best predicted mode to see if it's improving
+        # Monitor Physics Loss
         if self.use_gan:
-            # Only relevant when we are actually training with GAN/Physics
-            # We assume y_hat_best contains the [N, 30, 2] future trajectories
             val_jerk_loss = PhysicsLoss.compute_jerk_loss(y_hat_best)
-            self.log('val_jerk_loss', val_jerk_loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=1)
+            # FIXED: Added batch_size
+            self.log('val_jerk_loss', val_jerk_loss, prog_bar=True, on_step=False, on_epoch=True, batch_size=data.num_graphs)
 
-        # 2. Slice for Agent (The "Interesting" Vehicle)
-        # We filter metrics to only the primary agent to match leaderboard standards
+        # 2. Slice for Agent
         y_hat_agent = y_hat[:, data['agent_index'], :, : 2]
         y_agent = data.y[data['agent_index']]
         
-        # Calculate ADE/FDE for the agent
         fde_agent = torch.norm(y_hat_agent[:, :, -1] - y_agent[:, -1], p=2, dim=-1)
         best_mode_agent = fde_agent.argmin(dim=0)
         y_hat_best_agent = y_hat_agent[best_mode_agent, torch.arange(data.num_graphs)]
@@ -226,22 +223,22 @@ class HiVT(pl.LightningModule):
         self.minFDE.update(y_hat_best_agent, y_agent)
         self.minMR.update(y_hat_best_agent, y_agent)
         
-        self.log('val_minADE', self.minADE, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
-        self.log('val_minFDE', self.minFDE, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
-        self.log('val_minMR', self.minMR, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
+        # FIXED: Ensure batch_size is passed (using y_agent.size(0) is accurate here)
+        bs = y_agent.size(0)
+        self.log('val_minADE', self.minADE, prog_bar=True, on_step=False, on_epoch=True, batch_size=bs)
+        self.log('val_minFDE', self.minFDE, prog_bar=True, on_step=False, on_epoch=True, batch_size=bs)
+        self.log('val_minMR', self.minMR, prog_bar=True, on_step=False, on_epoch=True, batch_size=bs)
 
-        # 3. REALISM METRICS
+        # 3. Realism Metrics
         if _HAS_REALISM_METRICS:
-            # Physics metrics on the best trajectory
             self.val_jerk.update(y_hat_best_agent)
             self.val_speed_violation.update(y_hat_best_agent)
-            
-            # Diversity needs all modes + probabilities
             self.val_endpoint_diversity.update(y_hat_agent, pi[data['agent_index']])
 
-            self.log('val_jerk', self.val_jerk, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
-            self.log('val_speed', self.val_speed_violation, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
-            self.log('val_div', self.val_endpoint_diversity, prog_bar=True, on_step=False, on_epoch=True, batch_size=y_agent.size(0))
+            # FIXED: Added batch_size
+            self.log('val_jerk', self.val_jerk, prog_bar=True, on_step=False, on_epoch=True, batch_size=bs)
+            self.log('val_speed', self.val_speed_violation, prog_bar=True, on_step=False, on_epoch=True, batch_size=bs)
+            self.log('val_div', self.val_endpoint_diversity, prog_bar=True, on_step=False, on_epoch=True, batch_size=bs)
 
     def on_validation_epoch_end(self):
         metrics = self.trainer.callback_metrics
