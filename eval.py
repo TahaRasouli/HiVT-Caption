@@ -15,7 +15,7 @@ class AdvancedEvaluator:
         self.dataroot = dataroot
         self.maps = {
             loc: NuScenesMap(dataroot=self.dataroot, map_name=loc) 
-            for loc in ['singapore-onenorth', 'singapore-hollandv', 'singapore-queenstown', 'boston-seaport']
+            for loc in ['singapore-onenorth', 'singapore-hollandvillage', 'singapore-queenstown', 'boston-seaport']
         }
 
     def compute_off_road_rate(self, trajs, city, origin, theta):
