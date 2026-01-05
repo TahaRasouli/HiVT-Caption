@@ -55,10 +55,11 @@ class NuScenesHiVTDataModule(LightningDataModule):
         pass
 
     # --------------------------------------------------
-    def setup(self, stage: Optional[str] = None) -> None:
+def setup(self, stage: Optional[str] = None) -> None:
         """
         Create datasets for training and validation.
         """
+        # Create training dataset only during 'fit'
         if stage in (None, "fit"):
             self.train_dataset = NuScenesHiVTDataset(
                 root=self.root,
@@ -67,6 +68,8 @@ class NuScenesHiVTDataModule(LightningDataModule):
                 max_samples=self.max_train_samples,
             )
 
+        # Create validation dataset during 'fit' OR 'validate'
+        if stage in (None, "fit", "validate"):
             self.val_dataset = NuScenesHiVTDataset(
                 root=self.root,
                 split="val",
