@@ -55,7 +55,7 @@ class NuScenesHiVTDataModule(LightningDataModule):
         pass
 
     # --------------------------------------------------
-def setup(self, stage: Optional[str] = None) -> None:
+    def setup(self, stage: Optional[str] = None) -> None:
         """
         Create datasets for training and validation.
         """
