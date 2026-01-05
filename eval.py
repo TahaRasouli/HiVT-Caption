@@ -38,65 +38,75 @@ class AdvancedEvaluator:
         lane_conn = layers.get('lane_connector', '')
         
         return not (drivable or lane or lane_conn)
-
     def compute_scene_metrics(self, batch, y_hat):
-        """Calculates advanced realism metrics."""
-        # Selection logic remains the same
+        """
+        Calculates advanced realism metrics for a batch.
+        y_hat: [modes, nodes, steps, 2]
+        """
+        # --- 1. Best Mode Selection ---
+        # We find the best mode for the primary agent to evaluate realism on
+        agent_indices = batch.agent_index
         reg_mask = ~batch['padding_mask'][:, 20:]
+        
+        # Calculate FDE for all modes for ALL agents
         l2_norm = (torch.norm(y_hat[:, :, :, :2] - batch.y, p=2, dim=-1) * reg_mask).sum(dim=-1)
+        # best_mode_idx shape: [num_nodes]
         best_mode_idx = l2_norm.argmin(dim=0)
+        # Select the best trajectory for every agent
         best_trajs = y_hat[best_mode_idx, torch.arange(batch.num_nodes), :, :2]
 
-        # 1. Heading Error (Rad)
-        # Using .detach() to ensure no grad tracking during eval
-        v_pred = (best_trajs[:, -1] - best_trajs[:, -2]).detach()
-        v_gt = (batch.y[:, -1] - batch.y[:, -2]).detach()
+        # --- 2. Heading Error (Rad) ---
+        # Evaluate only on the primary agents to save time
+        best_agent_trajs = best_trajs[agent_indices]
+        gt_agent_trajs = batch.y[agent_indices]
         
-        # Compute angles
-        pred_theta = torch.atan2(v_pred[:, 1], v_pred[:, 0])
-        gt_theta = torch.atan2(v_gt[:, 1], v_gt[:, 0])
+        # Vector from second-to-last to last point
+        v_pred = (best_agent_trajs[:, -1] - best_agent_trajs[:, -2]).detach()
+        v_gt = (gt_agent_trajs[:, -1] - gt_agent_trajs[:, -2]).detach()
         
-        heading_err = torch.abs(pred_theta - gt_theta)
+        heading_err = torch.abs(torch.atan2(v_pred[:, 1], v_pred[:, 0]) - 
+                                torch.atan2(v_gt[:, 1], v_gt[:, 0]))
         # Wrap to [0, pi]
         heading_err = torch.where(heading_err > np.pi, 2*np.pi - heading_err, heading_err)
 
-        # 2. Off-Road Rate
+        # --- 3. Optimized Off-Road Rate ---
         off_road_count = 0
-        total_agents = best_trajs.size(0)
+        origin = batch.origin.cpu().numpy() # [num_graphs, 2]
+        theta = batch.theta.cpu().numpy()   # [num_graphs]
         
-        # Map city name index to actual string if necessary
-        # NuScenes usually stores location in the batch.
-        # If batch.city is a list of strings:
-        city = batch.city[0] if hasattr(batch, 'city') else 'singapore-onenorth'
-        
-        origin = batch.origin[0].cpu().numpy()
-        theta = batch.theta[0].cpu().numpy()
-        
-        cos, sin = np.cos(-theta), np.sin(-theta)
-        rot_mat = np.array([[cos, -sin], [sin, cos]])
-
-        for i in range(total_agents):
-            local_dest = best_trajs[i, -1].cpu().numpy()
-            # Transform local destination back to global
-            global_dest = (local_dest @ rot_mat.T) + origin
+        for i, idx in enumerate(agent_indices):
+            # 1. Get city (default to singapore-onenorth if not found)
+            city = batch.city[i] if hasattr(batch, 'city') else 'singapore-onenorth'
             
+            # 2. Get local destination of the PRIMARY agent
+            local_dest = best_trajs[idx, -1].cpu().numpy()
+            
+            # 3. Transform to Global
+            cos, sin = np.cos(-theta[i]), np.sin(-theta[i])
+            rot_mat = np.array([[cos, -sin], [sin, cos]])
+            global_dest = (local_dest @ rot_mat.T) + origin[i]
+            
+            # 4. Corrected Map Query
             if self.is_off_road(global_dest, city):
                 off_road_count += 1
 
-        # 3. Collision Rate
-        collision_detected = 0
-        # Check every 0.5s (every 5 steps at 10Hz) to save time
-        for t in range(0, best_trajs.size(1), 5):
+        # --- 4. Collision Rate ---
+        # Check every 0.5s (step 4, 9, 14, 19, 24, 29) to avoid being "stuck"
+        collision_detected_in_batch = 0
+        for t in range(4, best_trajs.size(1), 5):
+            # Calculate distance between ALL agents in the scene
             dists = torch.cdist(best_trajs[:, t, :], best_trajs[:, t, :])
-            dists += torch.eye(total_agents, device=best_trajs.device) * 10.0
-            if (dists < 1.8).any(): # Using 1.8m as average car width threshold
-                collision_detected = 1
+            # Add large value to diagonal so agents don't "collide" with themselves
+            dists += torch.eye(best_trajs.size(0), device=best_trajs.device) * 10.0
+            
+            if (dists < 1.8).any(): # 1.8m threshold for vehicle width
+                collision_detected_in_batch = 1
                 break
 
         return {
             "heading_err": heading_err.mean().item(),
-            "off_road": off_road_count / total_agents if total_agents > 0 else 0,
-            "collision": collision_detected
+            "off_road": off_road_count / len(agent_indices) if len(agent_indices) > 0 else 0,
+            "collision": collision_detected_in_batch
         }
 
 def main():
