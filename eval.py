@@ -93,7 +93,7 @@ class AdvancedEvaluator:
 def main():
     parser = ArgumentParser()
     parser.add_argument("--nusc_root", type=str, default="/mount/arbeitsdaten/analysis/rasoulta/nuscenes/nuscenes_meta/v1.0-trainval/")
-    parser.add_argument("--processed_root", type=str, default="/mount/arbeitsdaten/studenten4/rasoulta/dataset")
+    parser.add_argument("--processed_root", type=str, default="/mount/studenten/projects/rasoulta/dataset")
     parser.add_argument("--ckpt_path", type=str, required=True)
     parser.add_argument("--batch_size", type=int, default=32)
     args = parser.parse_args()
