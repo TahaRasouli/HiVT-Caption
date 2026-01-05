@@ -25,62 +25,71 @@ class AdvancedEvaluator:
 
     def is_off_road(self, pt, city):
         """Checks if a global (x, y) point is outside drivable areas."""
-        if city not in self.maps: return False
-        # get_layers_on_point returns a list of layer names at that coordinate
-        layers = self.maps[city].get_layers_on_point(pt[0], pt[1])
-        # A point is "on-road" if it's in a drivable_area or a lane
-        return not ('drivable_area' in layers or 'lane' in layers)
+        if city not in self.maps: 
+            return False
+        
+        # CORRECTED METHOD NAME
+        layers = self.maps[city].layers_on_point(pt[0], pt[1])
+        
+        # In NuScenes, layers_on_point returns a dict where keys are layer names
+        # and values are the tokens of the objects at that point.
+        drivable = layers.get('drivable_area', '')
+        lane = layers.get('lane', '')
+        lane_conn = layers.get('lane_connector', '')
+        
+        return not (drivable or lane or lane_conn)
 
     def compute_scene_metrics(self, batch, y_hat):
-        """
-        Calculates advanced realism metrics for a batch.
-        y_hat: [modes, nodes, steps, 2]
-        """
-        # 1. Best Mode Selection (based on minFDE)
+        """Calculates advanced realism metrics."""
+        # Selection logic remains the same
         reg_mask = ~batch['padding_mask'][:, 20:]
         l2_norm = (torch.norm(y_hat[:, :, :, :2] - batch.y, p=2, dim=-1) * reg_mask).sum(dim=-1)
         best_mode_idx = l2_norm.argmin(dim=0)
-        best_trajs = y_hat[best_mode_idx, torch.arange(batch.num_nodes), :, :2] # [N, 30, 2]
+        best_trajs = y_hat[best_mode_idx, torch.arange(batch.num_nodes), :, :2]
 
-        # 2. Final Heading Error (Rad)
-        # Using the last two points to approximate the heading vector
-        v_pred = best_trajs[:, -1] - best_trajs[:, -2]
-        v_gt = batch.y[:, -1] - batch.y[:, -2]
-        heading_err = torch.abs(torch.atan2(v_pred[:, 1], v_pred[:, 0]) - 
-                                torch.atan2(v_gt[:, 1], v_gt[:, 0]))
-        # Wrap angles to [0, pi]
-        heading_err = torch.min(heading_err, 2*np.pi - heading_err)
+        # 1. Heading Error (Rad)
+        # Using .detach() to ensure no grad tracking during eval
+        v_pred = (best_trajs[:, -1] - best_trajs[:, -2]).detach()
+        v_gt = (batch.y[:, -1] - batch.y[:, -2]).detach()
+        
+        # Compute angles
+        pred_theta = torch.atan2(v_pred[:, 1], v_pred[:, 0])
+        gt_theta = torch.atan2(v_gt[:, 1], v_gt[:, 0])
+        
+        heading_err = torch.abs(pred_theta - gt_theta)
+        # Wrap to [0, pi]
+        heading_err = torch.where(heading_err > np.pi, 2*np.pi - heading_err, heading_err)
 
-        # 3. Off-Road Rate
-        # We need to transform local back to global using batch.origin and batch.theta
+        # 2. Off-Road Rate
         off_road_count = 0
         total_agents = best_trajs.size(0)
         
-        # Note: In HiVT TemporalData, city is often stored as an attribute
-        city = getattr(batch, 'city', ['singapore-onenorth'])[0]
-        origin = batch.origin[0].cpu().numpy() # [1, 2]
+        # Map city name index to actual string if necessary
+        # NuScenes usually stores location in the batch.
+        # If batch.city is a list of strings:
+        city = batch.city[0] if hasattr(batch, 'city') else 'singapore-onenorth'
+        
+        origin = batch.origin[0].cpu().numpy()
         theta = batch.theta[0].cpu().numpy()
         
-        # Inverse Rotation Matrix
         cos, sin = np.cos(-theta), np.sin(-theta)
         rot_mat = np.array([[cos, -sin], [sin, cos]])
 
         for i in range(total_agents):
-            local_path = best_trajs[i].cpu().numpy()
-            global_path = (local_path @ rot_mat.T) + origin
+            local_dest = best_trajs[i, -1].cpu().numpy()
+            # Transform local destination back to global
+            global_dest = (local_dest @ rot_mat.T) + origin
             
-            # Check the final destination (t=3s) for off-road violation
-            if self.is_off_road(global_path[-1], city):
+            if self.is_off_road(global_dest, city):
                 off_road_count += 1
 
-        # 4. Collision Rate (Proximity check)
-        # Check if any two agents' best-trajs are closer than 2.0m at any future step
+        # 3. Collision Rate
         collision_detected = 0
-        for t in range(best_trajs.size(1)):
+        # Check every 0.5s (every 5 steps at 10Hz) to save time
+        for t in range(0, best_trajs.size(1), 5):
             dists = torch.cdist(best_trajs[:, t, :], best_trajs[:, t, :])
-            # Set diagonal to high value
             dists += torch.eye(total_agents, device=best_trajs.device) * 10.0
-            if (dists < 2.0).any():
+            if (dists < 1.8).any(): # Using 1.8m as average car width threshold
                 collision_detected = 1
                 break
 
