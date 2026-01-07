@@ -7,6 +7,7 @@ import torch
 
 from datamodules.nuscenes_datamodule import NuScenesHiVTDataModule
 from models.cvae import CVAE
+from models.hivt import HiVT
 
 # speed boost on Nvidia-A6000
 torch.set_float32_matmul_precision('medium')
