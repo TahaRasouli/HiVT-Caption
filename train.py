@@ -6,7 +6,7 @@ import torch.multiprocessing as mp
 import torch
 
 from datamodules.nuscenes_datamodule import NuScenesHiVTDataModule
-from models.hivt import HiVT
+from models.cvae import CVAE
 
 # speed boost on Nvidia-A6000
 torch.set_float32_matmul_precision('medium')
@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--ckpt_path", type=str, default=None)
 
     # Training arguments
+    parser.add_argument("--train_cvae", action="store_true")
     parser.add_argument("--devices", type=int, default=1)
     parser.add_argument("--max_epochs", type=int, default=64)
     parser.add_argument("--monitor", type=str, default="val_minFDE", choices=["val_minADE", "val_minFDE", "val_minMR"])
@@ -42,6 +43,11 @@ def main():
         args.lr = 1e-4 
 
     # 2. Model Initialization
+    if args.train_cvae:
+        print("--- initializing HiVT_CVAE ---")
+        args.num_modes = 1 # Force 1 mode for CVAE
+        model = CVAE(**vars(args))
+
     model = HiVT(**vars(args))
 
     # --- WARM START LOGIC (Improved) ---
