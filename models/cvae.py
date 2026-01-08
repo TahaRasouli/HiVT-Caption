@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from metrics import ADE, FDE
 from models import GlobalInteractor, LocalEncoder
-from models.cvae_decoder import CVAEDecoder
+from models import CVAEDecoder
 
 class CVAE(pl.LightningModule):
     def __init__(self, **kwargs):
