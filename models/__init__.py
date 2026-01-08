@@ -5,6 +5,7 @@ from models.embedding import MultipleInputEmbedding
 from models.embedding import SingleInputEmbedding
 from models.global_interactor import GlobalInteractor
 from models.global_interactor import GlobalInteractorLayer
+from models.mamba import MambaTemporalEncoder
 from models.local_encoder import AAEncoder
 from models.local_encoder import ALEncoder
 from models.local_encoder import LocalEncoder

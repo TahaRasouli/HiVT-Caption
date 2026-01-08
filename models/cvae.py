@@ -30,7 +30,7 @@ class CVAE(pl.LightningModule):
         )
         
         # Decoder
-        self.decoder = CVAEDecoder(embed_dim=embed_dim, latent_dim=16, future_steps=30)
+        self.decoder = CVAEDecoder(embed_dim=embed_dim, latent_dim=128, future_steps=30)
         
         self.minADE = ADE()
         self.minFDE = FDE()
@@ -56,24 +56,35 @@ class CVAE(pl.LightningModule):
 
     def training_step(self, data, batch_idx):
         context = self(data)
-        # Reshape [1, 1, N, 128] -> [N, 128]
         context = context.reshape(-1, self.hparams.embed_dim)
-        
         reg_mask = ~data['padding_mask'][:, self.historical_steps:]
         
-        # Forward Pass with GT (Training Mode)
-        y_hat, kld_loss = self.decoder(context, data.y)
+        # --- STRATEGY: Variety Loss (Winner Takes All) ---
+        # 1. Sample K times from the Prior (Learning to generate diversity)
+        K = 6 
+        B = context.size(0)
         
-        # Reconstruction Loss (L2 or Huber)
-        # Only calc loss on valid steps
-        recon_loss = F.mse_loss(y_hat[reg_mask], data.y[reg_mask])
+        # Repeat input for K samples
+        context_expanded = context.repeat_interleave(K, dim=0) # [B*K, Embed]
+        y_gt_expanded = data.y.repeat_interleave(K, dim=0)     # [B*K, Steps, 2]
+        mask_expanded = reg_mask.repeat_interleave(K, dim=0)   # [B*K, Steps]
         
-        # Total Loss = Recon + lambda * KLD
-        # usually lambda starts small and anneals, but 0.05 is a safe start
-        loss = recon_loss + 0.01 * kld_loss 
+        # 2. Forward Pass (Inference Mode - use Prior)
+        y_hat_flat, _ = self.decoder(context_expanded, y_gt=None) # [B*K, Steps, 2]
         
-        self.log("train_recon_loss", recon_loss, prog_bar=True, batch_size=data.num_graphs)
-        self.log("train_kld_loss", kld_loss, prog_bar=True, batch_size=data.num_graphs)
+        # 3. Calculate Error for ALL samples
+        # Squared error per sample: [B*K]
+        err = torch.norm(y_hat_flat - y_gt_expanded, p=2, dim=-1).mean(dim=-1) 
+        
+        # 4. Reshape to find best sample per batch
+        err_reshaped = err.reshape(B, K) # [Batch, K]
+        min_err, best_idx = err_reshaped.min(dim=1) # [Batch]
+        
+        # 5. Backpropagate ONLY the best sample (Winner Takes All)
+        # This tells the model: "I don't care if 5 samples are wrong, as long as 1 is right."
+        loss = min_err.mean() 
+        
+        self.log("train_variety_loss", loss, prog_bar=True, batch_size=data.num_graphs)
         return loss
 
     @torch.no_grad()
@@ -81,43 +92,44 @@ class CVAE(pl.LightningModule):
         context = self(data)
         context = context.reshape(-1, self.hparams.embed_dim)
         
-        # Generate Multiple Modes (e.g., 6 samples)
-        # We simulate "Modes" by sampling z 6 times
+        # 1. Generate Multiple Modes (Winner-Takes-All Evaluation)
         K = 6 
         B = context.size(0)
         
-        # Repeat context K times: [B*K, Embed]
+        # Repeat context K times
         context_expanded = context.repeat_interleave(K, dim=0)
         
-        # Inference (No GT provided)
+        # Inference (Using Prior)
         y_hat_flat, _ = self.decoder(context_expanded, y_gt=None)
         
-        # Reshape to [B, K, 30, 2] -> [Batch, Modes, Time, 2] for Metrics
+        # 2. Reshape to [Batch, Modes, Time, 2]
+        # First reshape to [Batch, K, 30, 2]
         y_hat = y_hat_flat.reshape(B, K, 30, 2)
-        y_hat = y_hat.permute(1, 0, 2, 3) # [Modes, Batch, Time, 2]
+        # Permute to [Modes, Batch, Time, 2] (Standard format for HiVT metrics)
+        y_hat = y_hat.permute(1, 0, 2, 3) 
         
-        # Metrics expects [Modes, Batch, Time, 2]
-        self.minADE.update(y_hat, data.y)
-        self.minFDE.update(y_hat, data.y)
+        # 3. Update Metrics
+        # CHANGED: Use self.val_minADE instead of self.minADE
+        self.val_minADE.update(y_hat, data.y)
+        self.val_minFDE.update(y_hat, data.y)
         
+        # Log both
+        self.log("val_minADE", self.val_minADE, prog_bar=True, batch_size=B)
         self.log("val_minFDE", self.val_minFDE, prog_bar=True, batch_size=B)
 
     def on_validation_epoch_end(self):
-        """
-        Prints a clean summary of the epoch's performance to the terminal.
-        Includes CVAE-specific losses (Recon + KLD) to track latent learning.
-        """
         metrics = self.trainer.callback_metrics
         if self.global_rank == 0:
-            # Fetch metrics from the trainer's dictionary
+            # Fetch metrics
             ade = metrics.get('val_minADE', 0.0)
             fde = metrics.get('val_minFDE', 0.0)
-            recon = metrics.get('train_recon_loss', 0.0)
-            kld = metrics.get('train_kld_loss', 0.0)
+            
+            # CHANGED: Fetch the new Variety Loss
+            # (If you revert to standard CVAE later, you can add try/except or .get checks)
+            variety_loss = metrics.get('train_variety_loss', 0.0)
             
             print(f"\nEpoch {self.current_epoch:03d} | "
-                  f"Recon Loss: {recon:.4f} | "
-                  f"KLD Loss: {kld:.4f} | "
+                  f"Variety Loss: {variety_loss:.4f} | "
                   f"val_minADE: {ade:.4f} | "
                   f"val_minFDE: {fde:.4f}")
 
