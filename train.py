@@ -49,7 +49,9 @@ def main():
         args.num_modes = 1 # Force 1 mode for CVAE
         model = CVAE(**vars(args))
 
-    model = HiVT(**vars(args))
+    else: 
+        print(f"--- initializing Standard HiVT ---") # Good practice to verify
+        model = HiVT(**vars(args))
 
     # --- WARM START LOGIC (Improved) ---
     actual_fit_path = args.ckpt_path
