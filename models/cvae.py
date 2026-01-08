@@ -36,8 +36,9 @@ class CVAE(pl.LightningModule):
         # 4. Metrics
         self.minADE = ADE()
         self.minFDE = FDE()
-        self.val_minADE = ADE() # <--- This caused your error
-        self.val_minFDE = FDE() # <--- This caused your error
+        self.val_minADE = ADE() 
+        self.val_minFDE = FDE() 
+
 
     def forward(self, data):
         if self.hparams.rotate:
@@ -97,18 +98,42 @@ class CVAE(pl.LightningModule):
         
         K = 6 
         B = context.size(0)
+        
+        # 1. Expand Context for K modes
         context_expanded = context.repeat_interleave(K, dim=0)
         
+        # 2. Inference
         y_hat_flat, _ = self.decoder(context_expanded, y_gt=None)
         
-        # Reshape for Metrics [Modes, Batch, Time, 2]
+        # 3. Reshape to [Modes, Batch, Time, 2]
         y_hat = y_hat_flat.reshape(B, K, 30, 2).permute(1, 0, 2, 3)
         
-        self.val_minADE.update(y_hat, data.y)
-        self.val_minFDE.update(y_hat, data.y)
+        # 4. Calculate Metrics Manually (Bypassing the crashing Metric class)
+        y_gt = data.y # [Batch, Time, 2]
         
-        self.log("val_minADE", self.val_minADE, prog_bar=True, batch_size=B)
-        self.log("val_minFDE", self.val_minFDE, prog_bar=True, batch_size=B)
+        # Calculate Euclidean distance for all points: [Modes, Batch, Time]
+        # (y_gt broadcasts automatically to match Modes)
+        dist = torch.norm(y_hat - y_gt, p=2, dim=-1)
+        
+        # -- minADE --
+        # Average over Time -> [Modes, Batch]
+        ade_per_mode = dist.mean(dim=-1)
+        # Min over Modes -> [Batch]
+        min_ade_per_agent, _ = ade_per_mode.min(dim=0)
+        # Average over Batch
+        val_minADE = min_ade_per_agent.mean()
+
+        # -- minFDE --
+        # Take last Time step -> [Modes, Batch]
+        fde_per_mode = dist[:, :, -1]
+        # Min over Modes -> [Batch]
+        min_fde_per_agent, _ = fde_per_mode.min(dim=0)
+        # Average over Batch
+        val_minFDE = min_fde_per_agent.mean()
+        
+        # 5. Log the manual values
+        self.log("val_minADE", val_minADE, prog_bar=True, batch_size=B)
+        self.log("val_minFDE", val_minFDE, prog_bar=True, batch_size=B)
 
     def on_validation_epoch_end(self):
         metrics = self.trainer.callback_metrics
