@@ -122,16 +122,24 @@ class MambaTemporalEncoder(nn.Module):
     def forward(self, x, padding_mask=None):
         """
         Input x: [Time, Batch, Embed] (HiVT format)
-        Output: [Time, Batch, Embed]
+        Output: [Batch, Embed] (Latent representation of the history)
         """
-        # Permute to [Batch, Time, Embed] for Mamba
-        x = x.permute(1, 0, 2)
+        # 1. Permute to [Batch, Time, Embed] for Mamba processing
+        x = x.permute(1, 0, 2) 
         
+        # 2. Run Mamba Layers
         for mamba_layer, norm_layer in self.layers:
             res = x
             x = mamba_layer(x)
             x = norm_layer(x + res)
             
-        # Permute back to [Time, Batch, Embed]
+        # 3. Permute back to [Time, Batch, Embed]
         x = x.permute(1, 0, 2)
-        return self.out_norm(x)
+        
+        # 4. Normalize
+        x = self.out_norm(x)
+        
+        # --- THE FIX IS HERE ---
+        # The original TemporalEncoder returns 'out[-1]' (The last hidden state).
+        # We must do the same to collapse the Time dimension.
+        return x[-1]  # Shape becomes [Batch, Embed]
