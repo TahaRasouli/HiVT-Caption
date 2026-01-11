@@ -12,6 +12,7 @@ from torch_geometric.typing import Size
 from torch_geometric.utils import softmax
 from torch_geometric.utils import subgraph
 
+from models import MambaTemporalEncoder
 from models import MultipleInputEmbedding
 from models import SingleInputEmbedding
 from utils import DistanceDropEdge
@@ -43,11 +44,18 @@ class LocalEncoder(nn.Module):
                                     num_heads=num_heads,
                                     dropout=dropout,
                                     parallel=parallel)
-        self.temporal_encoder = TemporalEncoder(historical_steps=historical_steps,
-                                                embed_dim=embed_dim,
-                                                num_heads=num_heads,
-                                                dropout=dropout,
-                                                num_layers=num_temporal_layers)
+        # self.temporal_encoder = TemporalEncoder(historical_steps=historical_steps,
+        #                                         embed_dim=embed_dim,
+        #                                         num_heads=num_heads,
+        #                                         dropout=dropout,
+        #                                         num_layers=num_temporal_layers)
+
+        self.temporal_encoder = MambaTemporalEncoder(
+            embed_dim=embed_dim,
+            historical_steps=historical_steps,
+            num_layers=num_temporal_layers // 2 # Use 2 Mamba layers (comparable to 4 transformer layers)
+        )
+
         self.al_encoder = ALEncoder(node_dim=node_dim,
                                     edge_dim=edge_dim,
                                     embed_dim=embed_dim,
