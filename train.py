@@ -103,6 +103,7 @@ def main():
         max_epochs=args.max_epochs,
         callbacks=[checkpoint_callback], # Critical to include this
         log_every_n_steps=50,
+        num_sanity_val_steps=0
     )
 
     datamodule = NuScenesHiVTDataModule(
