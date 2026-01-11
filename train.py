@@ -48,23 +48,42 @@ def main():
     # 2. Model Initialization
     model = HiVT(**vars(args))
 
-    # --- WARM START LOGIC (Improved) ---
+    # --- WARM START LOGIC (Improved for Transfer Learning) ---
     actual_fit_path = args.ckpt_path
     if args.ckpt_path:
         print(f"--- Loading Weights from: {args.ckpt_path} ---")
         ckpt = torch.load(args.ckpt_path, map_location="cpu")
+        state_dict = ckpt['state_dict']
         
-        # Check for GAN critics
-        has_critics = any("D_short" in k for k in ckpt['state_dict'].keys())
+        # Check for GAN critics to decide if we are resuming or transferring
+        has_critics = any("D_short" in k for k in state_dict.keys())
         
         if not has_critics:
-            # Official HiVT checkpoints are Supervised-only
-            print("Detected Supervised checkpoint. Loading state_dict (strict=False).")
-            model.load_state_dict(ckpt['state_dict'], strict=False)
-            # Reset actual_fit_path so Lightning doesn't try to resume optimizer states
+            print("Detected Supervised/CVAE checkpoint. performing SMART TRANSFER.")
+            
+            # 1. Filter out incompatible layers (Decoder & Multi-Head Projections)
+            keys_to_remove = []
+            for key in state_dict.keys():
+                # Remove Decoder (CVAE decoder != GAN decoder)
+                if "decoder" in key:
+                    keys_to_remove.append(key)
+                # Remove Global Interactor Output Head (1 mode != 6 modes)
+                if "global_interactor.multihead_proj" in key:
+                    keys_to_remove.append(key)
+            
+            # 2. Actually delete them
+            for k in keys_to_remove:
+                print(f"Dropping mismatched key: {k}")
+                del state_dict[k]
+                
+            # 3. Load the rest (Encoders + Global Blocks)
+            model.load_state_dict(state_dict, strict=False)
+            
+            # Reset actual_fit_path so we start a NEW training run (epoch 0)
             actual_fit_path = None 
         else:
             print("Detected GAN checkpoint. Full resume enabled.")
+            # If it's a GAN checkpoint, we assume shapes match exactly.
 
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
