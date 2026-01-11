@@ -4,6 +4,10 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.strategies import DDPStrategy
 import torch.multiprocessing as mp
 import torch
+import torch.utils._pytree
+# Monkey-patch to fix transformers/torch version mismatch
+if not hasattr(torch.utils._pytree, 'register_pytree_node'):
+    torch.utils._pytree.register_pytree_node = torch.utils._pytree._register_pytree_node
 
 from datamodules.nuscenes_datamodule import NuScenesHiVTDataModule
 from models.hivt import HiVT
