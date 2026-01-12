@@ -47,6 +47,7 @@ def main():
     parser.add_argument("--max_epochs", type=int, default=64)
     parser.add_argument("--monitor", type=str, default="val_minFDE", choices=["val_minADE", "val_minFDE", "val_minMR"])
     parser.add_argument("--save_top_k", type=int, default=5)
+    parser.add_argument("--grad_clip", type=float, default=None)
     
     # Model switching argument
     parser.add_argument("--train_cvae_gan", action="store_true", help="Train the VAE-GAN architecture")
@@ -121,13 +122,13 @@ def main():
         accelerator="gpu",
         devices=args.devices,
         strategy=strategy,
-        precision="16-mixed",  
+        precision="16-mixed",
         max_epochs=args.max_epochs,
         callbacks=[checkpoint_callback],
         log_every_n_steps=50,
-        num_sanity_val_steps=0 # Skip sanity check to avoid startup hangs
+        num_sanity_val_steps=0,
+        gradient_clip_val=args.grad_clip 
     )
-
     datamodule = NuScenesHiVTDataModule(
         root=args.root,
         train_batch_size=args.train_batch_size,

@@ -7,7 +7,6 @@ from models import GlobalInteractor, LocalEncoder
 from models import CVAEDecoder
 from models.critics import ShortScaleCritic, MidScaleCritic, LongScaleCritic
 
-# Import your loss definitions
 from losses import AdversarialDiscriminatorLoss, AdversarialGeneratorLoss, PhysicsLoss
 
 class CVAE_GAN(pl.LightningModule):
@@ -186,18 +185,20 @@ class CVAE_GAN(pl.LightningModule):
                   f"val_minADE: {ade:.4f} | val_minFDE: {fde:.4f}")
 
     def configure_optimizers(self):
-        # Generator params
-        g_params = list(self.local_encoder.parameters()) + \
-                   list(self.global_interactor.parameters()) + \
-                   list(self.decoder.parameters())
-                   
-        # Discriminator params
+        # 1. Freeze Encoder & Interactor (Safety Anchor)
+        for p in self.local_encoder.parameters():
+            p.requires_grad = False
+        for p in self.global_interactor.parameters():
+            p.requires_grad = False
+            
+        # 2. Only optimize Decoder (Generator)
+        # Note: We removed encoder/interactor params from this list
+        opt_g = torch.optim.AdamW(self.decoder.parameters(), lr=1e-5, weight_decay=1e-4)
+        
+        # 3. Optimize Discriminators
         d_params = list(self.critic_short.parameters()) + \
                    list(self.critic_mid.parameters()) + \
                    list(self.critic_long.parameters())
-        
-        # Lower LR for GAN fine-tuning is usually safer
-        opt_g = torch.optim.AdamW(g_params, lr=1e-4, weight_decay=1e-4)
-        opt_d = torch.optim.AdamW(d_params, lr=2e-4, weight_decay=1e-4)
+        opt_d = torch.optim.AdamW(d_params, lr=1e-5, weight_decay=1e-4)
         
         return [opt_g, opt_d], []
