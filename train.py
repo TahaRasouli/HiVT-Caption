@@ -47,14 +47,14 @@ def main():
     parser.add_argument("--max_epochs", type=int, default=64)
     parser.add_argument("--monitor", type=str, default="val_minFDE", choices=["val_minADE", "val_minFDE", "val_minMR"])
     parser.add_argument("--save_top_k", type=int, default=5)
-    parser.add_argument("--grad_clip", type=float, default=None)
-    parser.add_argument("--grad_clip", type=float, default=None)
-    parser.add_argument("--freeze_encoder", action="store_true")
     
-    # Model switching argument
-    parser.add_argument("--train_cvae_gan", action="store_true", help="Train the VAE-GAN architecture")
+    # --- NEW ARGUMENTS (Ensure these appear only ONCE) ---
+    parser.add_argument("--train_cvae_gan", action="store_true")
+    parser.add_argument("--grad_clip", type=float, default=None)   # <--- Check for duplicates of this
+    parser.add_argument("--freeze_encoder", action="store_true")
+    # -----------------------------------------------------
 
-    # Add model specific args (Using HiVT's as base, CVAE_GAN uses same args)
+    # HiVT model specific args
     parser = HiVT.add_model_specific_args(parser)
     args = parser.parse_args()
 
