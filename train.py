@@ -48,6 +48,8 @@ def main():
     parser.add_argument("--monitor", type=str, default="val_minFDE", choices=["val_minADE", "val_minFDE", "val_minMR"])
     parser.add_argument("--save_top_k", type=int, default=5)
     parser.add_argument("--grad_clip", type=float, default=None)
+    parser.add_argument("--grad_clip", type=float, default=None)
+    parser.add_argument("--freeze_encoder", action="store_true")
     
     # Model switching argument
     parser.add_argument("--train_cvae_gan", action="store_true", help="Train the VAE-GAN architecture")
@@ -127,7 +129,7 @@ def main():
         callbacks=[checkpoint_callback],
         log_every_n_steps=50,
         num_sanity_val_steps=0,
-        gradient_clip_val=args.grad_clip 
+        # gradient_clip_val=args.grad_clip  <--- REMOVE THIS LINE, we do it in the model now
     )
     datamodule = NuScenesHiVTDataModule(
         root=args.root,
