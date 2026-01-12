@@ -78,38 +78,44 @@ def main():
     
     if args.ckpt_path:
         print(f"--- Loading Weights from: {args.ckpt_path} ---")
-        ckpt = torch.load(args.ckpt_path, map_location="cpu")
-        state_dict = ckpt['state_dict']
         
-        # Check if we are resuming a GAN run or starting fresh from CVAE
-        is_gan_checkpoint = any("critic" in k for k in state_dict.keys())
-        
-        if not is_gan_checkpoint and args.train_cvae_gan:
-            print("Detected CVAE checkpoint -> Transferring to CVAE_GAN.")
-            print("Loading Encoders and Decoder. Critics will be initialized randomly.")
+        # === FIX STARTS HERE ===
+        # If we are freezing the encoder, we CANNOT load the optimizer state 
+        # because the parameter groups have changed. We must force a fresh start.
+        if args.freeze_encoder:
+            print("(!) Freezing Enabled: Loading weights manually and resetting optimizer.")
+            ckpt = torch.load(args.ckpt_path, map_location="cpu")
+            model.load_state_dict(ckpt['state_dict'], strict=False)
             
-            # Since CVAE and CVAE_GAN share the exact same Generator architecture,
-            # we can load with strict=False to ignore the missing 'critic' keys.
-            # We DO NOT delete the decoder keys because we want to keep the pretrained CVAE decoder!
-            
-            model.load_state_dict(state_dict, strict=False)
-            
-            # Reset actual_fit_path so we start a NEW training run (epoch 0)
+            # Set this to None so Lightning doesn't try to load the old optimizer
             actual_fit_path = None 
             
-        elif not is_gan_checkpoint and not args.train_cvae_gan:
-             # Case: Loading CVAE (1 mode) into Standard HiVT (6 modes)
-             # This requires deleting the decoder/head as they don't match.
-             print("Detected CVAE checkpoint -> Transferring to Standard HiVT (Regression).")
-             keys_to_remove = [k for k in state_dict.keys() if "decoder" in k or "multihead_proj" in k]
-             for k in keys_to_remove:
-                 del state_dict[k]
-             model.load_state_dict(state_dict, strict=False)
-             actual_fit_path = None
-             
+        # ... (Keep the rest of your logic below, usually in an 'else' block now) ...
         else:
-            print("Detected matching checkpoint type. Full resume enabled.")
-            # Normal resume behavior
+            ckpt = torch.load(args.ckpt_path, map_location="cpu")
+            state_dict = ckpt['state_dict']
+            
+            # Check if we are resuming a GAN run or starting fresh from CVAE
+            is_gan_checkpoint = any("critic" in k for k in state_dict.keys())
+            
+            if not is_gan_checkpoint and args.train_cvae_gan:
+                # ... (Your existing logic) ...
+                print("Detected CVAE checkpoint -> Transferring to CVAE_GAN.")
+                model.load_state_dict(state_dict, strict=False)
+                actual_fit_path = None 
+                
+            elif not is_gan_checkpoint and not args.train_cvae_gan:
+                # ... (Your existing logic) ...
+                print("Detected CVAE checkpoint -> Transferring to Standard HiVT.")
+                keys_to_remove = [k for k in state_dict.keys() if "decoder" in k or "multihead_proj" in k]
+                for k in keys_to_remove:
+                    del state_dict[k]
+                model.load_state_dict(state_dict, strict=False)
+                actual_fit_path = None
+                
+            else:
+                print("Detected matching checkpoint type. Full resume enabled.")
+                # This keeps actual_fit_path set, which is what we want ONLY for normal resumes
 
     # Callbacks
     checkpoint_callback = ModelCheckpoint(
