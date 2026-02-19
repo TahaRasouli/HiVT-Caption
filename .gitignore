@@ -1,0 +1,6 @@
+*.pt
+*.ckpt
+lightning_logs/
+checkpoints/
+__pycache__/
+.DS_Store
