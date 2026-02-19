@@ -82,5 +82,14 @@ class ManeuverGRU(pl.LightningModule):
         self.val_f1_per_class.reset()
         self.val_f1_macro.reset()
 
+    def test_step(self, batch, batch_idx):
+        # We reuse the validation logic exactly
+        return self.validation_step(batch, batch_idx)
+
+    def on_test_epoch_end(self):
+        # We reuse the validation end logic to print the final table
+        print("\n" + "="*20 + " FINAL TEST RESULTS " + "="*20)
+        self.on_validation_epoch_end()
+
     def configure_optimizers(self):
         return torch.optim.Adam(self.parameters(), lr=self.lr)
