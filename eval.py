@@ -2,6 +2,7 @@ import torch
 import pytorch_lightning as pl
 from datamodule import ManeuverDataModule
 from model import ManeuverGRU
+import glob
 import os
 
 def check_counts(dataloader):
@@ -23,9 +24,15 @@ def run_test():
     # Performance optimization for A6000
     torch.set_float32_matmul_precision('medium')
 
-    # 1. PATH TO YOUR BEST CHECKPOINT
-    # Update this string with the EXACT filename from your checkpoints folder
-    CHECKPOINT_PATH = "/mount/arbeitsdaten65/studenten4/rasoulta/HiVT-Caption/checkpoints/maneuver-classifier-epoch=44-val_f1_macro=0.9000.ckpt"
+    # Use a wildcard (*) to find the file regardless of hidden spaces or quotes
+    ckpt_pattern = "/mount/arbeitsdaten65/studenten4/rasoulta/HiVT-Caption/checkpoints/maneuver-classifier-epoch=95*.ckpt"
+    found_files = glob.glob(ckpt_pattern)
+
+    if not found_files:
+        print(f"❌ Error: No checkpoint matching pattern found!")
+    else:
+        CHECKPOINT_PATH = found_files[0]
+        print(f"✅ Found checkpoint: {CHECKPOINT_PATH}")
 
     if not os.path.exists(CHECKPOINT_PATH):
         print(f"❌ Error: Checkpoint not found at {CHECKPOINT_PATH}")

@@ -4,24 +4,39 @@ from torch.utils.data import DataLoader
 from torch.nn.utils.rnn import pad_sequence
 from dataset import ManeuverDataset
 
+# def maneuver_collate_fn(batch):
+#     """
+#     Pads sequences of different lengths (e.g. 50, 100, 150 points) 
+#     so they can be processed in a single batch.
+#     """
+#     features = [item[0] for item in batch]
+#     labels = [item[1] for item in batch]
+
+#     # Pad features with 0.0
+#     features_padded = pad_sequence(features, batch_first=True, padding_value=0.0)
+    
+#     # Pad labels with -100 so CrossEntropyLoss ignores them
+#     labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)
+
+#     return features_padded, labels_padded
+
+
 def maneuver_collate_fn(batch):
-    """
-    Pads sequences of different lengths (e.g. 50, 100, 150 points) 
-    so they can be processed in a single batch.
-    """
+    # batch is a list of tuples: [(feats, labels, filename), ...]
     features = [item[0] for item in batch]
     labels = [item[1] for item in batch]
-
-    # Pad features with 0.0
-    features_padded = pad_sequence(features, batch_first=True, padding_value=0.0)
     
-    # Pad labels with -100 so CrossEntropyLoss ignores them
+    # Check if your dataset __getitem__ returns 3 items
+    # If it does, we grab the filenames here:
+    filenames = [item[2] for item in batch] if len(batch[0]) > 2 else None
+
+    features_padded = pad_sequence(features, batch_first=True, padding_value=0.0)
     labels_padded = pad_sequence(labels, batch_first=True, padding_value=-100)
 
-    return features_padded, labels_padded
+    # Return 3 items to match the model's expected unpacking
+    return features_padded, labels_padded, filenames
 
 class ManeuverDataModule(pl.LightningDataModule):
-    # FIXED: Added num_workers to __init__
     def __init__(self, data_root, batch_size=16, num_workers=8):
         super().__init__()
         self.data_root = data_root
@@ -29,8 +44,10 @@ class ManeuverDataModule(pl.LightningDataModule):
         self.num_workers = num_workers
 
     def setup(self, stage=None):
-        self.train_ds = ManeuverDataset(f"{self.data_root}/train")
-        self.val_ds = ManeuverDataset(f"{self.data_root}/val")
+        # Augment only the training set
+        self.train_ds = ManeuverDataset(f"{self.data_root}/train", augment=True)
+        self.val_ds = ManeuverDataset(f"{self.data_root}/val", augment=False)
+        self.test_ds = ManeuverDataset(f"{self.data_root}/test", augment=False)
         self.test_ds = ManeuverDataset(f"{self.data_root}/test")
 
     def train_dataloader(self):
