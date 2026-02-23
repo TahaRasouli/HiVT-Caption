@@ -339,7 +339,7 @@ def main():
     p.add_argument("--dataroot", required=True)
     p.add_argument("--out", required=True)
     p.add_argument("--version", default="v1.0-trainval")
-    p.add_argument("--split", choices=["train", "val"], default="train")
+    p.add_argument("--split", choices=["train", "val", "test"], default="train")
     args = p.parse_args()
 
     NuScenesHiVTPreprocessor(

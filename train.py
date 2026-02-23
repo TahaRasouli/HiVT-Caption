@@ -13,6 +13,7 @@ torch.set_float32_matmul_precision('medium')
 mp.set_start_method('spawn', force=True)
 
 def main():
+    torch.autograd.set_detect_anomaly(True) 
     pl.seed_everything(2022)
     parser = ArgumentParser()
 
@@ -72,12 +73,12 @@ def main():
         accelerator="gpu",
         devices=args.devices,
         strategy=strategy,
-        precision="16-mixed",  
+        # CRITICAL FIX: Change from "16-mixed" to "bf16-mixed" or "32"
+        precision="32",  
         max_epochs=args.max_epochs,
         callbacks=[checkpoint_callback],
         log_every_n_steps=50,
     )
-
     datamodule = NuScenesHiVTDataModule(
         root=args.root,
         train_batch_size=args.train_batch_size,

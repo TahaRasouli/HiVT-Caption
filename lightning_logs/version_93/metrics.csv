@@ -1,0 +1,5 @@
+d_r1_short,train_pi_loss,g_loss_short,epoch,d_loss,d_loss_long,d_r1_mid,g_loss_mid,d_r1_long,g_loss_long,train_variety_loss,d_loss_short,d_loss_mid,g_loss,step,val_minADE,val_minFDE
+nan,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,49,,
+nan,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,99,,
+nan,nan,nan,0,nan,nan,nan,nan,nan,nan,nan,nan,nan,nan,149,,
+,,,0,,,,,,,,,,,165,nan,nan

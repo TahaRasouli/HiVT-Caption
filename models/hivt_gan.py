@@ -50,7 +50,7 @@ class HiVTGAN(pl.LightningModule):
         })
         
         # 4. Losses
-        self.d_loss_fn = AdversarialDiscriminatorLoss(lambda_r1=1.0)
+        self.d_loss_fn = AdversarialDiscriminatorLoss(lambda_r1=0.0)
         self.g_loss_fn = AdversarialGeneratorLoss(lambda_adv=1.0)
         self.lambda_adv = 0.1 
         self.lambda_jerk = 0.05
@@ -78,45 +78,76 @@ class HiVTGAN(pl.LightningModule):
         # Return both for the original decoder
         return local_embed, global_embed
 
+
     def training_step(self, data, batch_idx):
         opt_g, opt_d = self.optimizers()
         
         # ===============================
-        # 1. GENERATE FAKE TRAJECTORIES
+        # 1. IMMEDIATE SANITIZATION
         # ===============================
+        # We MUST clean the data before it enters the model or hits the rotate_mat
+        if data.y is not None:
+            data.y = torch.nan_to_num(data.y, nan=0.0, posinf=0.0, neginf=0.0)
+            data.y = torch.clamp(data.y, min=-100.0, max=100.0)
+            
         local_embed, global_embed = self(data)
-        
-        # loc shape: [6, B, 30, 2] | pi shape: [B, 6]
         loc, pi = self.decoder(local_embed, global_embed)
         
-        # Permute to [B, 6, 30, 2] for easier processing
+        if torch.isnan(loc).any():
+            raise ValueError(f"FATAL: Generator outputted NaN at Step {batch_idx}.")
+            
         y_hat_reshaped = loc.permute(1, 0, 2, 3) 
         B, K, H, D = y_hat_reshaped.shape
         y_gt = data.y
         
-        # Masking and Variety Loss
-        reg_mask = ~data['padding_mask'][:, self.historical_steps:] # [B, 30]
-        mask_expanded = reg_mask.unsqueeze(1).expand(B, K, H)       # [B, 6, 30]
-        y_gt_expanded = y_gt.unsqueeze(1).expand(B, K, H, D)        # [B, 6, 30, 2]
+        # ===============================
+        # 2. ISOLATE VALID AGENTS
+        # ===============================
+        valid_mask = ~data['padding_mask'][:, self.historical_steps:] # [B, 30]
+        agent_has_future = valid_mask.any(dim=-1) # [B]
         
-        err = torch.norm(y_hat_reshaped - y_gt_expanded, p=2, dim=-1) * mask_expanded
-        err = err.sum(dim=-1) / (mask_expanded.sum(dim=-1) + 1e-6)  # [B, 6]
-        
-        # Find best mode
-        min_err, best_idx = err.min(dim=1)
-        variety_loss = min_err.mean()
-        
-        # Probability Loss (Teach 'pi' to predict the best index)
-        pi_loss = F.cross_entropy(pi, best_idx)
-        
-        # Select best fakes for the Discriminator
-        best_fakes = y_hat_reshaped[torch.arange(B), best_idx] # [B, 30, 2]
-        
-        real_dict = {'short': y_gt, 'mid': y_gt, 'long': y_gt}
-        fake_dict = {'short': best_fakes, 'mid': best_fakes, 'long': best_fakes}
+        # DDP Failsafe for empty batches
+        is_empty_batch = not agent_has_future.any()
+        if is_empty_batch:
+            y_gt_valid = torch.zeros((1, H, D), device=self.device, requires_grad=True)
+            best_fakes_valid = torch.zeros((1, H, D), device=self.device, requires_grad=True)
+            pi_valid = torch.zeros((1, K), device=self.device, requires_grad=True)
+            mask_valid = torch.ones((1, H), dtype=torch.bool, device=self.device)
+            N = 1
+        else:
+            y_hat_valid = y_hat_reshaped[agent_has_future] # [N, 6, 30, 2]
+            y_gt_valid = y_gt[agent_has_future] # [N, 30, 2]
+            mask_valid = valid_mask[agent_has_future] # [N, 30]
+            pi_valid = pi[agent_has_future] # [N, 6]
+            N = y_hat_valid.size(0)
 
         # ===============================
-        # 2. TRAIN DISCRIMINATOR
+        # 3. GENERATOR LOSS (Valid Agents Only)
+        # ===============================
+        if not is_empty_batch:
+            mask_expanded = mask_valid.unsqueeze(1).expand(N, K, H)      
+            y_gt_expanded = y_gt_valid.unsqueeze(1).expand(N, K, H, D)         
+            
+            diff = y_hat_valid - y_gt_expanded
+            err = torch.sqrt(diff.pow(2).sum(dim=-1) + 1e-6) * mask_expanded
+            
+            # Since these are valid agents, mask_expanded.sum > 0, preventing 1e6 gradient spikes
+            err = err.sum(dim=-1) / (mask_expanded.sum(dim=-1) + 1e-6)  
+            
+            min_err, best_idx = err.min(dim=1)
+            variety_loss = min_err.mean()
+            pi_loss = F.cross_entropy(pi_valid, best_idx)
+            
+            best_fakes_valid = y_hat_valid[torch.arange(N), best_idx] # [N, 30, 2]
+        else:
+            variety_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+            pi_loss = torch.tensor(0.0, device=self.device, requires_grad=True)
+
+        real_dict = {'short': y_gt_valid, 'mid': y_gt_valid, 'long': y_gt_valid}
+        fake_dict = {'short': best_fakes_valid, 'mid': best_fakes_valid, 'long': best_fakes_valid}
+
+        # ===============================
+        # 4. TRAIN DISCRIMINATOR
         # ===============================
         self.toggle_optimizer(opt_d)
         opt_d.zero_grad()
@@ -124,35 +155,55 @@ class HiVTGAN(pl.LightningModule):
         detached_fakes = {k: v.detach() for k, v in fake_dict.items()}
         d_loss, d_logs = self.d_loss_fn(self.critics, real_dict, detached_fakes)
         
+        if is_empty_batch: d_loss = d_loss * 0.0 
+            
         self.manual_backward(d_loss)
+        
+        # --- THE ULTIMATE FAILSAFE: GRADIENT SCRUBBING ---
+        for p in self.critics.parameters():
+            if p.grad is not None:
+                torch.nan_to_num_(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+                
+        torch.nn.utils.clip_grad_norm_(self.critics.parameters(), max_norm=2.0)
         opt_d.step()
         self.untoggle_optimizer(opt_d)
 
         # ===============================
-        # 3. TRAIN GENERATOR
+        # 5. TRAIN GENERATOR
         # ===============================
         self.toggle_optimizer(opt_g)
         opt_g.zero_grad()
         
         g_adv_loss, g_logs = self.g_loss_fn(self.critics, fake_dict)
-        jerk_loss = PhysicsLoss.compute_jerk_loss(best_fakes)
+        jerk_loss = PhysicsLoss.compute_jerk_loss(best_fakes_valid)
         
-        # Total Generator Loss
         g_total_loss = variety_loss + pi_loss + (self.lambda_adv * g_adv_loss) + (self.lambda_jerk * jerk_loss)
         
+        if is_empty_batch: g_total_loss = g_total_loss * 0.0
+            
         self.manual_backward(g_total_loss)
+        
+        g_params = list(self.local_encoder.parameters()) + list(self.global_interactor.parameters()) + list(self.decoder.parameters())
+        
+        # --- THE ULTIMATE FAILSAFE: GRADIENT SCRUBBING ---
+        for p in g_params:
+            if p.grad is not None:
+                torch.nan_to_num_(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+                
+        torch.nn.utils.clip_grad_norm_(g_params, max_norm=2.0)
+        
         opt_g.step()
         self.untoggle_optimizer(opt_g)
-
+        
         # ===============================
-        # 4. LOGGING
+        # 6. LOGGING
         # ===============================
-        self.log("train_variety_loss", variety_loss, prog_bar=True, batch_size=B)
-        self.log("train_pi_loss", pi_loss, prog_bar=False, batch_size=B)
-        self.log("g_loss", g_total_loss, prog_bar=False, batch_size=B)
-        self.log("d_loss", d_loss, prog_bar=False, batch_size=B)
-        for k, v in {**d_logs, **g_logs}.items():
-            self.log(k, v, prog_bar=False, batch_size=B)
+        if not is_empty_batch:
+            self.log("train_variety_loss", variety_loss, prog_bar=True, batch_size=B)
+            self.log("g_loss", g_total_loss, prog_bar=False, batch_size=B)
+            self.log("d_loss", d_loss, prog_bar=False, batch_size=B)
+            for k, v in {**d_logs, **g_logs}.items():
+                self.log(k, v, prog_bar=False, batch_size=B)
 
     @torch.no_grad()
     def validation_step(self, data, batch_idx):

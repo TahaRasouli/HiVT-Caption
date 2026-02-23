@@ -1,0 +1,27 @@
+class_weights: !!python/object/apply:torch._utils._rebuild_tensor_v2
+- !!python/object/apply:torch.storage._load_from_bytes
+  - !!binary |
+    gAKKCmz8nEb5IGqoUBkugAJN6QMugAJ9cQAoWBAAAABwcm90b2NvbF92ZXJzaW9ucQFN6QNYDQAA
+    AGxpdHRsZV9lbmRpYW5xAohYCgAAAHR5cGVfc2l6ZXNxA31xBChYBQAAAHNob3J0cQVLAlgDAAAA
+    aW50cQZLBFgEAAAAbG9uZ3EHSwR1dS6AAihYBwAAAHN0b3JhZ2VxAGN0b3JjaApGbG9hdFN0b3Jh
+    Z2UKcQFYDgAAADk0Mzg5ODg1MTA0MDQ4cQJYAwAAAGNwdXEDSwZOdHEEUS6AAl1xAFgOAAAAOTQz
+    ODk4ODUxMDQwNDhxAWEuBgAAAAAAAADMExU/iVllP+AnLj9GDc9AUCa+QL9YOj8=
+- 0
+- !!python/tuple
+  - 6
+- !!python/tuple
+  - 1
+- false
+- !!python/object/apply:collections.OrderedDict
+  - []
+future_steps: 30
+id_to_class:
+  0: follow
+  1: turn_left
+  2: turn_right
+  3: lane_change_left
+  4: lane_change_right
+  5: stationary
+lr: 0.0005
+num_classes: 6
+num_traj_candidates: 6
