@@ -4,7 +4,7 @@ import os
 from tqdm import tqdm
 
 # ================= CONFIGURATION =================
-JSON_PATH = "project-4.json"  # The file you downloaded from Label Studio
+JSON_PATH = "export backup.json"  # The file you downloaded from Label Studio
 SOURCE_PT_DIR = "/mount/studenten/projects/rasoulta/dataset/train_processed_labeled"
 FINAL_DIR = "/mount/studenten/projects/rasoulta/dataset/caption-final"
 
